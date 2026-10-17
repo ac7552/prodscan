@@ -15,7 +15,7 @@ and the Xcode Command Line Tools (`swiftc`).
 
 ```bash
 # 1) scan from the command line
-python3 prodscan.py --target http://localhost:3000            # zero-config, auto-profiled
+python3 prodscan.py --target http://localhost:3000            # just a URL: auto-discovers signup/login/forms
 python3 prodscan.py --config targets/example.json --out-md report.md
 
 # 2) run the dashboard (local, token-gated web UI)
@@ -31,9 +31,11 @@ Copy `targets/example.json` to `targets/<yourapp>.json` and adjust the paths/fie
 
 ## How to use it
 
-1. **Point it at a target.** In the app, type a URL or pick a config. **Local host** (`localhost`,
-   `127.0.0.1`, `*.localhost`, `*.test`) runs the **full suite**; any **non-local URL** is forced to a
-   **passive, read-only** profile — the UI tells you which before you run.
+1. **Point it at a target.** In the app, just type a **URL** (or pick a config). For a **local host**
+   (`localhost`, `127.0.0.1`, `*.localhost`, `*.test`) it **auto-discovers** the app's signup, login and
+   forms and runs the **full suite** — no config needed. Any **non-local URL** is forced to a **passive,
+   read-only** profile. The UI tells you which before you run. (A config still gives you exact control and
+   is handy when auto-discovery can't find a non-standard signup/login flow.)
 2. **Run a scan.** Findings come back as **PASS / FAIL / WARN / INFO / SKIP** with evidence and a fix,
    and the run ends on a **GO / CONDITIONAL / NO-GO** verdict.
 3. **Review findings.** Each report shows a verdict badge, KPI tiles, the FAIL/WARN table (with the exact

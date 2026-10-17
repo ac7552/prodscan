@@ -278,16 +278,162 @@ class Scanner:
         return bbscan.Client(self.base, rate=self.rate)
 
     def authed(self, c):
-        chk = self.cfg.get("auth", {}).get("authed_check", "/")
-        r = c.get(chk)
-        return r.status == 200
+        chk = self.cfg.get("auth", {}).get("authed_check")
+        cands = ([chk] if chk else []) + ["/account", "/dashboard", "/profile",
+                                          "/settings", "/me", "/home"]
+        for p in cands:
+            if not p:
+                continue
+            r = c.get(p)
+            if r.status == 200 and not re.search(r'type="password"', r.body or ""):
+                return True
+        h = c.get("/").body or ""
+        return bool(re.search(r'sign out|log ?out|/sign_out|/session["\']?\s*,?\s*'
+                              r'["\']?delete|data-method="delete"', h, re.I))
 
-    def apost(self, c, path, data, token_page):
-        """Authenticated POST using the meta CSRF token via header (handles
-        per-form tokens)."""
-        tok = meta_token(c.get(token_page).body)
+    def _meta(self, c):
+        """A usable global CSRF meta-token from any page (per-form tokens need
+        the header path; the meta token works for all authed POSTs)."""
+        for p in (self.cfg.get("auth", {}).get("register", {}).get("form_page"),
+                  "/account", "/"):
+            if not p:
+                continue
+            t = meta_token(c.get(p).body)
+            if t:
+                return t
+        return None
+
+    def apost(self, c, path, data, token_page=None):
+        """Authenticated POST using the CSRF meta-token via header."""
+        tok = meta_token(c.get(token_page).body) if token_page else None
+        tok = tok or self._meta(c)
         return c.post(path, data=data,
                       headers={self.csrf_header: tok} if tok else None)
+
+    # -- auto-discovery (config-free scanning from just a URL) --------------
+    SIGNUP_PATHS = ["/sign_up", "/signup", "/register", "/registration/new",
+                    "/registrations/new", "/users/new", "/users/sign_up",
+                    "/accounts/new", "/account/new", "/join", "/auth/register",
+                    "/users/register", "/signup/new"]
+    LOGIN_PATHS = ["/login", "/sign_in", "/signin", "/session/new",
+                   "/sessions/new", "/users/sign_in", "/auth/login", "/users/login"]
+
+    def _discover_form(self, paths, kind):
+        """Find a signup/login form by probing common paths; map its fields to
+        __EMAIL__ / __PASSWORD__ and fill the rest with safe defaults."""
+        c = self.client()
+        for p in paths:
+            r = c.get(p)
+            if r.status != 200 or "__ERROR__" in r.body:
+                continue
+            _, forms = bbscan.parse_page(r.body)
+            for f in forms:
+                if f["method"] != "post":
+                    continue
+                inp = f["inputs"]
+                if not any(i.get("type") == "password" and i.get("name") for i in inp):
+                    continue
+                email = next((i.get("name") for i in inp if i.get("name")
+                              and re.search(r'email|login|username', i["name"], re.I)), None)
+                if not email:
+                    continue
+                fields = {}
+                for i in inp:
+                    n, t = i.get("name"), i.get("type", "text")
+                    if not n or n == "authenticity_token":
+                        continue
+                    if t == "password":
+                        fields[n] = "__PASSWORD__"
+                    elif n == email:
+                        fields[n] = "__EMAIL__"
+                    elif t == "submit" or re.search(r'commit', n, re.I):
+                        fields[n] = i.get("value") or "Submit"
+                    elif t in ("hidden", "text", "email", "tel", "number", "textarea", ""):
+                        fields[n] = i.get("value") or "Test"
+                    elif t == "checkbox":
+                        fields[n] = "1"
+                return {"form_page": p, "action": f["action"] or p, "fields": fields}
+        return None
+
+    def autodiscover_auth(self):
+        reg = self._discover_form(self.SIGNUP_PATHS, "register")
+        login = self._discover_form(self.LOGIN_PATHS, "login")
+        if not (reg and login):
+            self.rep.note("Auto-discovery: no signup/login form found — running "
+                          "unauthenticated (point at a config for the full suite).")
+            return
+        self.cfg.setdefault("auth", {})
+        self.cfg["auth"].setdefault("csrf_header", "X-CSRF-Token")
+        self.cfg["auth"]["register"] = reg
+        self.cfg["auth"]["login"] = login
+        self.rep.note(f"Auto-discovered auth: signup {reg['action']}, "
+                      f"login {login['action']}.")
+
+    def autodiscover_targets(self):
+        """From the authenticated crawl, derive owned-object create flows,
+        a profile-update form, and a file-upload form."""
+        reg_a = self.cfg.get("auth", {}).get("register", {}).get("action")
+        login_a = self.cfg.get("auth", {}).get("login", {}).get("action")
+        owned, seen = [], set()
+        for f in self.inv["forms"]:
+            act = f.get("action")
+            if (not act or f.get("method") != "post" or act in (reg_a, login_a)
+                    or act in seen or "search" in act or "session" in act):
+                continue
+            if any(i.get("type") == "password" for i in f["inputs"]):
+                continue
+            if any(i.get("name") == "_method" for i in f["inputs"]):
+                continue  # update/delete form, not a create
+            textf = next((i.get("name") for i in f["inputs"] if i.get("name")
+                          and i.get("type", "text") in ("text", "textarea", "")), None)
+            if not textf:
+                continue
+            seen.add(act)
+            fields = {}
+            for i in f["inputs"]:
+                n, t = i.get("name"), i.get("type", "text")
+                if not n or n == "authenticity_token":
+                    continue
+                fields[n] = ("__MARK__" if n == textf else
+                             (i.get("value") or "Create") if (t == "submit" or
+                              re.search(r'commit', n, re.I)) else
+                             "1" if t == "checkbox" else (i.get("value") or "test"))
+            base = act.rstrip("/")
+            owned.append({"name": re.sub(r'[^a-z]', '', base.split("/")[-1].lower()) or "obj",
+                          "action": act, "token_page": act, "fields": fields,
+                          "list_page": act, "id_regex": re.escape(base) + r"/(\d+)",
+                          "item_url": base + "/{id}"})
+            if len(owned) >= 3:
+                break
+        if owned:
+            self.cfg["owned_objects"] = owned
+            o = owned[0]
+            sx = {k: ("__PAYLOAD__" if v == "__MARK__" else v) for k, v in o["fields"].items()}
+            self.cfg["stored_xss_fields"] = [{"action": o["action"],
+                                              "token_page": o["token_page"],
+                                              "view": o["list_page"], "fields": sx}]
+        # profile-update form (has _method) -> mass assignment
+        for f in self.inv["forms"]:
+            if f.get("action") and any(i.get("name") == "_method" for i in f["inputs"]):
+                bf = {i["name"]: (i.get("value") or "Test") for i in f["inputs"]
+                      if i.get("name") and i["name"] not in ("authenticity_token", "_method")
+                      and i.get("type") not in ("password", "submit", "file")}
+                self.cfg["mass_assignment"] = {"action": f["action"],
+                                               "token_page": f["action"], "base_fields": bf}
+                break
+        # file-upload form
+        for f in self.inv["forms"]:
+            ff = next((i.get("name") for i in f["inputs"] if i.get("type") == "file"), None)
+            if ff and f.get("action"):
+                of = {i["name"]: (i.get("value") or "test") for i in f["inputs"]
+                      if i.get("name") and i.get("type") in ("text", "hidden", "textarea", "")}
+                self.cfg["file_upload"] = {"action": f["action"], "token_page": f["action"],
+                                           "file_field": ff, "fields": of}
+                break
+        found = [k for k in ("owned_objects", "mass_assignment", "file_upload")
+                 if self.cfg.get(k)]
+        if found:
+            self.rep.note("Auto-discovered targets: " + ", ".join(found) + ".")
 
     def register(self, email, pw):
         reg = self.cfg.get("auth", {}).get("register")
@@ -1292,8 +1438,12 @@ class Scanner:
                           "methods, error exposure, content discovery, dependency/CVE "
                           "only.")
         else:
+            if not self.cfg.get("auth"):      # URL-only mode: discover the app
+                self.autodiscover_auth()
             self.setup_accounts()
         self.map_surface()
+        if self._profile == "full" and self.A and not self.cfg.get("owned_objects"):
+            self.autodiscover_targets()
         checks = [
             self.check_headers, self.check_cookies, self.check_cors,
             self.check_methods, self.check_error_exposure,
