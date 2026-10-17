@@ -39,8 +39,9 @@ Copy `targets/example.json` to `targets/<yourapp>.json` and adjust the paths/fie
 3. **Review findings.** Each report shows a verdict badge, KPI tiles, the FAIL/WARN table (with the exact
    request/response signal), and the checks that passed.
 4. **Generate a PoC.** On a known-vulnerable-library finding, click **Generate PoC**. With
-   `ANTHROPIC_API_KEY` set it uses the Anthropic API to write a CVE-specific verifier; otherwise it emits
-   a reviewed stub plus a prompt you (or an LLM) can fill.
+   the Anthropic API (key in `ANTHROPIC_API_KEY`, or in `~/.config/prodscan/anthropic_key` so the desktop
+   app finds it across relaunches) it writes a CVE-specific verifier; otherwise it emits a reviewed stub
+   plus a prompt you (or an LLM) can fill.
 5. **Run the PoC.** Click **Run PoC** to execute the verifier and see **CONFIRMED / NOT / COULD-NOT-TEST**.
    PoCs are read-only and self-refuse against non-local targets unless you pass `--i-am-authorized`.
 

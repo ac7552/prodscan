@@ -170,10 +170,24 @@ the file. Return:
 '''
 
 
+def get_api_key():
+    """Anthropic key from $ANTHROPIC_API_KEY, else ~/.config/prodscan/anthropic_key
+    (so a Finder-launched app picks it up without launchd, across relaunches)."""
+    k = os.environ.get("ANTHROPIC_API_KEY")
+    if k and k.strip():
+        return k.strip()
+    try:
+        with open(os.path.expanduser("~/.config/prodscan/anthropic_key")) as f:
+            v = f.read().strip()
+            return v or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def fill_check_via_llm(spec: PocSpec):
     """Ask the Anthropic API to write the run_check() body for this advisory.
     Returns the (4-space-indented) Python body, or None if no key / on error."""
-    key = os.environ.get("ANTHROPIC_API_KEY")
+    key = get_api_key()
     if not key:
         return None
     prompt = (PROMPT_TEMPLATE.format(
