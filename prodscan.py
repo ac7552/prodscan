@@ -1275,6 +1275,18 @@ class Scanner:
                           "— no accounts, no payloads, no mutation, no brute-force.")
         self._profile = profile
         print(f"[*] prodscan -> {self.base}  (profile: {profile})")
+        probe = self.client().get_follow("/")[0]
+        if probe.status == 0 or "__ERROR__" in (probe.body or ""):
+            self.rep.add(check="reachability", category="engine", status="FAIL",
+                         severity="High", title="Target unreachable — scan aborted",
+                         endpoint=self.base,
+                         detail=f"Could not fetch {self.base}: {(probe.body or '')[:140]}. "
+                                "Check the scheme (http vs https), host, port, and that "
+                                "the server is actually running.",
+                         remediation="Fix the base URL / start the server, then re-scan "
+                                     "(a common mistake is https:// against an http:// server).")
+            self.rep.note("Aborted: target unreachable (no response).")
+            return self.rep
         if profile == "safe":
             self.rep.note("PASSIVE profile active: transport/headers, cookies, CORS, "
                           "methods, error exposure, content discovery, dependency/CVE "
