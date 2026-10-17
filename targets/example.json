@@ -1,0 +1,70 @@
+{
+  "_comment": "Target config template. Copy to <yourapp>.json and adjust the paths/fields to match YOUR app (discover them black-box: view the signup/login pages and forms). base_url must be a local host for the full suite; a non-local base_url is forced to the passive, read-only profile.",
+
+  "base_url": "http://localhost:3000",
+  "rate": 6,
+  "allow_writes": true,
+  "allow_email": false,
+  "cve_lookup": true,
+
+  "auth": {
+    "csrf_header": "X-CSRF-Token",
+    "authed_check": "/account",
+    "register": {
+      "form_page": "/sign_up",
+      "action": "/users",
+      "fields": {
+        "user[email]": "__EMAIL__",
+        "user[password]": "__PASSWORD__",
+        "user[password_confirmation]": "__PASSWORD__",
+        "commit": "Sign up"
+      }
+    },
+    "login": {
+      "form_page": "/login",
+      "action": "/session",
+      "fields": {
+        "email": "__EMAIL__",
+        "password": "__PASSWORD__",
+        "commit": "Sign in"
+      }
+    },
+    "logout": { "action": "/session", "method": "delete", "token_page": "/account" }
+  },
+
+  "owned_objects": [
+    {
+      "name": "thing",
+      "action": "/things",
+      "token_page": "/things",
+      "fields": { "thing[name]": "__MARK__", "commit": "Create" },
+      "list_page": "/things",
+      "id_regex": "/things/(\\d+)",
+      "item_url": "/things/{id}",
+      "edit_fields": { "thing[name]": "EDITED_BY_B" },
+      "owner_field": "thing[user_id]"
+    }
+  ],
+
+  "mass_assignment": {
+    "action": "/account",
+    "token_page": "/account",
+    "base_fields": { "user[name]": "Test" }
+  },
+
+  "file_upload": {
+    "action": "/posts",
+    "token_page": "/posts/new",
+    "file_field": "post[images][]",
+    "fields": { "post[body]": "upload test" }
+  },
+
+  "stored_xss_fields": [
+    {
+      "action": "/things",
+      "token_page": "/things",
+      "view": "/things",
+      "fields": { "thing[name]": "__PAYLOAD__", "commit": "Create" }
+    }
+  ]
+}

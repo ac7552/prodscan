@@ -1,0 +1,21 @@
+# --- secrets & target-specific data (never publish) ---
+throwaway_creds*.txt
+endpoint.json
+reports/
+report_*.md
+pocs/
+
+# target configs are private (they describe a specific app); ship only the template
+targets/*.json
+!targets/example.json
+
+# curb-specific helper scripts
+register_and_scan.py
+authed_scan.py
+
+# --- build artifacts ---
+ProdscanDashboard.app/
+__pycache__/
+*.pyc
+.ruby-lsp/
+.DS_Store

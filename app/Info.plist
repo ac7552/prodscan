@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>            <string>Prodscan Dashboard</string>
+  <key>CFBundleDisplayName</key>     <string>Prodscan Dashboard</string>
+  <key>CFBundleIdentifier</key>      <string>com.local.prodscan.dashboard</string>
+  <key>CFBundleVersion</key>         <string>1.0</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundlePackageType</key>     <string>APPL</string>
+  <key>CFBundleSignature</key>       <string>????</string>
+  <key>CFBundleExecutable</key>      <string>ProdscanDashboard</string>
+  <key>LSMinimumSystemVersion</key>  <string>10.13</string>
+  <key>NSHighResolutionCapable</key> <true/>
+  <key>LSBackgroundOnly</key>        <false/>
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key><true/>
+  </dict>
+</dict>
+</plist>
