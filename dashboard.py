@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 BASE = os.path.dirname(os.path.abspath(__file__))          # engine (may be read-only in a .app)
 DATA_DIR = os.path.expanduser("~/Library/Application Support/prodscan")
@@ -150,14 +150,28 @@ def gen_poc_from_report(report_name, idx):
     ver = m.group(2) if m else "0"
     adv = re.search(r'(CVE-\d{4}-\d+|GHSA-[\w-]+)',
                     f.get("detail", "") + " " + f.get("title", ""))
+    aliases = tuple(re.findall(r'GHSA-[\w-]+', f.get("detail", "")))
     spec = pocgen.PocSpec(target=data.get("target", ""), library=lib, version=ver,
                           advisory_id=adv.group(1) if adv else "",
                           advisory_summary=f.get("detail", ""),
-                          endpoint=f.get("endpoint", "/"))
+                          endpoint=f.get("endpoint", "/"), aliases=aliases)
+    # Client-side library XSS (jQuery &c.): a runnable HTML harness that actually
+    # fires, instead of an HTTP verifier that can only say INCONCLUSIVE.
+    if pocgen.client_poc_for(spec):
+        try:
+            html_path, info = pocgen.emit_client_poc(spec, POCS_DIR)
+            name = os.path.basename(html_path)
+            return {"kind": "html", "poc": name, "url": "/poc/" + name,
+                    "cves": info.get("cves", []), "code": open(html_path).read()}
+        except Exception as e:  # noqa: BLE001 — fall back to the verifier below
+            html_err = str(e)
+    else:
+        html_err = None
     body = pocgen.fill_check_via_llm(spec)      # None if no ANTHROPIC_API_KEY
     poc_path, _ = pocgen.emit_poc(spec, POCS_DIR, check_body=body)
-    return {"poc": os.path.basename(poc_path), "ai": bool(body),
-            "code": open(poc_path).read()}
+    return {"kind": "py", "poc": os.path.basename(poc_path), "ai": bool(body),
+            "code": open(poc_path).read(),
+            "note": ("live HTML PoC unavailable (%s)" % html_err) if html_err else ""}
 
 
 def _poc_target_local(path):
@@ -221,6 +235,23 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(u.query)
         if u.path == "/":
             return self._send(200, PAGE, "text/html; charset=utf-8")
+        if u.path.startswith("/poc/"):
+            # Serve generated client-side PoC harnesses + their vendored libs.
+            # Localhost-only (the server binds 127.0.0.1); no token so the
+            # harness's relative vendor/ script loads resolve.
+            if self.headers.get("Host", "").split(":")[0] not in ALLOWED_HOSTS:
+                return self._send(403, {"error": "forbidden"})
+            rel = unquote(u.path[len("/poc/"):])
+            full = os.path.realpath(os.path.join(POCS_DIR, rel))
+            root = os.path.realpath(POCS_DIR)
+            if not (full == root or full.startswith(root + os.sep)) \
+                    or not os.path.isfile(full) \
+                    or os.path.splitext(full)[1] not in (".html", ".js"):
+                return self._send(404, {"error": "not found"})
+            ctype = ("text/html; charset=utf-8" if full.endswith(".html")
+                     else "application/javascript")
+            with open(full, "rb") as fh:
+                return self._send(200, fh.read(), ctype)
         if u.path.startswith("/api/") and not self._authorized():
             return self._send(403, {"error": "forbidden"})
         if u.path == "/api/configs":
@@ -357,12 +388,32 @@ th{color:var(--mut);font-weight:600;font-size:10px;letter-spacing:.12em;text-tra
 .s-FAIL{color:var(--fail);border-color:var(--fail)}.s-WARN{color:var(--warn);border-color:var(--warn)}
 .s-PASS{color:var(--pass);border-color:var(--pass)}.s-INFO{color:var(--info);border-color:var(--info)}.s-SKIP{color:var(--skip);border-color:var(--skip)}
 .mut{color:var(--mut)}.gold{color:var(--gold2)}.warnc{color:var(--warn)}
+.ht{position:relative;cursor:help}
+.why{margin-left:7px;color:var(--bronze);font-style:normal;font-weight:400;user-select:none}
+.why:hover,.why:focus{color:var(--gold2);outline:none}
+.pill.ht:hover,.pill.ht:focus{outline:none;filter:brightness(1.25)}
+.tip{display:none;position:absolute;left:0;top:150%;z-index:30;width:320px;max-width:66vw;
+ background:#0c131a;border:1px solid var(--gold);border-radius:4px;padding:11px 13px;
+ color:var(--fg);font:400 12px/1.55 -apple-system,"Segoe UI",Roboto,sans-serif;letter-spacing:0;
+ text-transform:none;white-space:normal;box-shadow:0 10px 30px rgba(0,0,0,.55)}
+.tip::before{content:attr(data-label);display:block;color:var(--gold2);font-family:var(--serif);
+ font-size:10px;letter-spacing:.16em;text-transform:uppercase;margin-bottom:5px}
+.ht:hover .tip,.ht:focus .tip{display:block}
+td:last-child .tip{left:auto;right:0}
 .ev{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:#aebfca;white-space:pre-wrap;margin-top:4px}
 pre{background:#0c131a;border:1px solid var(--line);border-radius:3px;padding:12px;overflow:auto;max-height:240px;font-size:11.5px;color:var(--mut)}
 .note{font-size:11px;color:var(--mut);margin-top:10px;letter-spacing:.04em}
 .empty{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
 .rose{color:var(--bronze);opacity:.42;margin-bottom:26px}
 .tagline{font-family:var(--serif);font-size:18px;color:var(--mut);letter-spacing:.04em}
+@keyframes rose-spin{to{transform:rotate(360deg)}}
+@keyframes rose-breathe{0%,100%{opacity:.30}50%{opacity:.74}}
+@keyframes mark-breathe{0%,100%{opacity:.55}50%{opacity:1}}
+body.scanning .rose{animation:rose-breathe 2.4s ease-in-out infinite;color:var(--gold)}
+body.scanning .rose svg{animation:rose-spin 16s linear infinite;transform-origin:50% 50%}
+body.scanning .brand .mark{animation:mark-breathe 1.6s ease-in-out infinite}
+body.scanning .brand .mark svg{animation:rose-spin 5s linear infinite;transform-origin:50% 50%}
+@media(prefers-reduced-motion:reduce){body.scanning .rose,body.scanning .rose svg,body.scanning .brand .mark,body.scanning .brand .mark svg{animation:none}body.scanning .rose{opacity:.6;color:var(--gold)}}
 @media(max-width:820px){.wrap{grid-template-columns:1fr;height:auto}.side{border-right:0;border-bottom:1px solid var(--line)}}
 </style></head><body>
 <header>
@@ -391,6 +442,63 @@ pre{background:#0c131a;border:1px solid var(--line);border-radius:3px;padding:12
 </div>
 <script>
 const $=s=>document.querySelector(s), esc=s=>(s||"").replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+// Plain-language "why this is a risk" per check, keyed by category/check.
+const WHY={
+ 'headers/hsts':"Without HSTS a first visit over plain HTTP — or an attacker-forced downgrade on hostile Wi-Fi — can be intercepted and HTTPS stripped, exposing the session cookie. HSTS tells browsers to only ever connect over TLS.",
+ 'headers/referrer-policy':"The browser attaches the full referring URL (path and query) to outbound requests. With no Referrer-Policy, anything in your URLs — IDs, tokens, internal paths — leaks to third-party sites, analytics and ad networks.",
+ 'headers/content-security-policy':"With no CSP, injected markup can pull scripts from anywhere. CSP is the main defense-in-depth that keeps an XSS flaw from escalating into full script execution and data exfiltration.",
+ 'headers/x-content-type-options':"Without nosniff, a browser may MIME-sniff a response and run, say, a user-uploaded file served as text as a script — turning a benign upload into XSS.",
+ 'headers/clickjacking':"With no X-Frame-Options / frame-ancestors, your pages can be framed invisibly on an attacker's site and the user tricked into clicking real controls (clickjacking).",
+ 'headers/tls':"Served over plain HTTP, all traffic — credentials, session cookies, data — travels in cleartext and can be read or altered by anyone on the network path.",
+ 'headers/banner':"Advertising the exact server/framework and version hands an attacker the list of known CVEs and default misconfigurations to try first. Suppressing banners removes a free recon shortcut.",
+ 'csrf/csrf':"A POST form with no anti-CSRF token can be submitted from an attacker's page while the victim is logged in, performing state-changing actions (transfers, settings, deletes) as that user without their intent.",
+ 'dependencies/dependency-cve':"This client-side library version matches a published advisory. Depending on the CVE an attacker can achieve DOM-based XSS, prototype pollution or other code execution in your users' browsers.",
+ 'dependencies/inventory':"Informational: the client-side libraries and versions fingerprinted on the page, used to match against known-CVE databases. A library shown as “name@?” was detected but its version string couldn't be read, so it can't be checked for CVEs.",
+ 'injection/sqli':"If user input reaches a SQL query unparameterized, an attacker can read, modify or destroy the whole database and often bypass authentication.",
+ 'injection/ssti':"User input evaluated by a server-side template engine can escalate to remote code execution on the server.",
+ 'injection/open-redirect':"An endpoint that redirects to a user-supplied URL lends your domain's trust to phishing and can bypass redirect allowlists in OAuth flows.",
+ 'injection/host-header':"Trusting the Host header lets an attacker poison password-reset links, cache keys and absolute URLs, sending victims to attacker-controlled hosts.",
+ 'xss/reflected-xss':"User input echoed into the page without escaping lets an attacker run arbitrary JavaScript in a victim's session — stealing cookies and tokens or acting as that user.",
+ 'xss/stored-xss':"Attacker-controlled content saved and later rendered to other users runs script in their sessions — the most damaging XSS, hitting every viewer.",
+ 'cors/cors':"An over-permissive CORS policy (reflecting arbitrary origins with credentials) lets any website read authenticated responses on behalf of your logged-in users.",
+ 'cookies/cookie-flags':"Session cookies without HttpOnly / Secure / SameSite can be stolen via XSS, sent over plain HTTP, or ridden in CSRF attacks.",
+ 'methods/trace':"HTTP TRACE can be abused (Cross-Site Tracing) to read headers and cookies that are otherwise protected, and has no production use.",
+ 'methods/methods':"Unexpected HTTP methods left enabled can expose write or delete operations that were never meant to be reachable.",
+ 'access-control/idor':"Object references (IDs in URLs or params) that aren't scoped to the current user let an attacker read or change other users' records by guessing or incrementing IDs.",
+ 'access-control/idor-read':"An object ID that isn't scoped to the current user lets an attacker read other users' records by guessing or incrementing the ID.",
+ 'access-control/idor-write':"An object ID that isn't scoped to the current user lets an attacker modify other users' records by guessing or incrementing the ID.",
+ 'access-control/privesc':"A lower-privileged user can reach admin-only routes or actions — full privilege escalation.",
+ 'access-control/mass-assign-owner':"Binding request params straight to model attributes lets an attacker set fields they shouldn't — owner_id, role, admin — taking over records or escalating privileges.",
+ 'mass-assignment/mass-assign':"Binding request params straight to model attributes lets an attacker set fields they shouldn't — owner_id, role, admin — taking over records or escalating privileges.",
+ 'access-control/format-bypass':"Appending a format (.json / .xml) or changing the content-type can bypass an access control that only guarded the HTML route.",
+ 'auth/logout':"If logout doesn't invalidate the server-side session, a stolen or observed session stays valid after the user believes they've signed out.",
+ 'auth/password-policy':"With no minimum password strength, users (and attackers via credential stuffing) can rely on trivially guessable passwords.",
+ 'auth/password-reset':"A weak reset flow — guessable tokens, no expiry, host-header-controlled links — lets an attacker take over accounts.",
+ 'auth/rate-limit':"No lockout or throttling on login lets an attacker brute-force or credential-stuff passwords at scale.",
+ 'auth/session-fixation':"If the session ID isn't rotated at login, an attacker who plants a known session ID can hijack the account once the victim authenticates.",
+ 'auth/user-enum':"Different responses for valid vs. invalid usernames let an attacker harvest a list of real accounts to target.",
+ 'file-upload/file-upload':"Accepting uploads without validating type and content lets an attacker store a script or executable that is later served and run.",
+ 'errors/verbose-errors':"Stack traces and framework error pages leak source paths, library versions and config — a roadmap for the next attack.",
+ 'errors/exposed-path':"A sensitive path (config, .git, admin, backups) is reachable and can leak secrets or source code.",
+ 'discovery/content-discovery':"Informational: common paths that responded, useful for mapping the attack surface.",
+ 'engine/reachability':"The scanner couldn't fully reach the target, so results are incomplete — not a clean bill of health."};
+const WHY_CAT={'headers':"A missing or weak security response header. On its own it's rarely exploitable, but each one removes a layer of defense-in-depth.",
+ 'access-control':"An authorization gap: a user reaching data or actions that should be out of their scope.",
+ 'auth':"A weakness in the authentication or session lifecycle that can lead to account takeover.",
+ 'injection':"Untrusted input reaching an interpreter (SQL, template, redirect, host) where it can change the intended command or destination."};
+function whyText(r){const k=(r.category||'')+'/'+(r.check||'');
+ if(WHY[k])return WHY[k];
+ if((r.check||'').indexOf('banner-')===0)return WHY['headers/banner'];
+ return WHY_CAT[r.category]||'';}
+function whyTip(r){const t=whyText(r);return t?` <span class="why ht" tabindex="0" aria-label="why it matters">&#9432;<span class="tip" data-label="why it matters">${esc(t)}</span></span>`:'';}
+// What each status level means — shown on hover over the status badge.
+const STATUS_WHY={
+ FAIL:"A confirmed or likely production-readiness defect. A Critical/High FAIL drives a NO-GO verdict; a Medium FAIL drives CONDITIONAL.",
+ WARN:"Worth fixing but not a hard blocker — hardening / defense-in-depth, or a lower-confidence finding. Doesn't fail the verdict on its own.",
+ PASS:"The check ran and the target behaved safely — no issue found for this check.",
+ INFO:"Context, not a problem: inventory, reachable paths, enabled methods. Useful for understanding the attack surface.",
+ SKIP:"The check didn't run — not applicable, the needed surface wasn't reachable, or it was gated off (passive profile, or CVE lookup disabled)."};
+function statusCell(st){return `<td><span class="pill s-${st} ht" tabindex="0">${st}<span class="tip" data-label="status · ${st}">${esc(STATUS_WHY[st]||'')}</span></span></td>`;}
 const TOKEN=new URLSearchParams(location.search).get('token')||'';
 async function j(u,o){o=o||{};o.headers=Object.assign({'X-Prodscan-Token':TOKEN},o.headers||{});const r=await fetch(u,o);return r.json();}
 async function loadConfigs(){const c=await j('/api/configs');$('#cfg').innerHTML=c.map(x=>`<option>${esc(x)}</option>`).join('')||'<option>(no configs)</option>';}
@@ -401,8 +509,8 @@ async function showReport(name){const d=await j('/api/report?name='+encodeURICom
   const s=d.summary||{}; const order={FAIL:0,WARN:1,PASS:2,INFO:3,SKIP:4};
   const res=(d.results||[]).slice().sort((a,b)=>(order[a.status]??9)-(order[b.status]??9));
   const kpi=['FAIL','WARN','PASS','INFO','SKIP'].map(k=>`<div class="kpi"><b class="s-${k}">${s[k]||0}</b><span>${k}</span></div>`).join('');
-  const rows=res.filter(r=>r.status!=='PASS'&&r.status!=='INFO'&&r.status!=='SKIP').map(r=>{const oi=(d.results||[]).indexOf(r);const pb=(r.category==='dependencies'&&r.check==='dependency-cve')?`<div><button class="mini genpoc" data-rep="${esc(name)}" data-idx="${oi}">⚙ Generate PoC</button></div>`:'';return `<tr><td><span class="pill s-${r.status}">${r.status}</span></td><td>${esc(r.severity)}</td><td class="mut">${esc(r.category)}/${esc(r.check)}</td><td><b>${esc(r.title)}</b>${r.endpoint?`<div class="mut">${esc(r.endpoint)}</div>`:''}<div class="ev">${esc(r.detail)}</div>${r.remediation?`<div class="mut">fix: ${esc(r.remediation)}</div>`:''}${pb}</td></tr>`;}).join('');
-  const passed=res.filter(r=>['PASS','INFO','SKIP'].includes(r.status)).map(r=>`<tr><td><span class="pill s-${r.status}">${r.status}</span></td><td class="mut">${esc(r.category)}/${esc(r.check)}</td><td>${esc(r.title)}</td></tr>`).join('');
+  const rows=res.filter(r=>r.status!=='PASS'&&r.status!=='INFO'&&r.status!=='SKIP').map(r=>{const oi=(d.results||[]).indexOf(r);const pb=(r.category==='dependencies'&&r.check==='dependency-cve')?`<div><button class="mini genpoc" data-rep="${esc(name)}" data-idx="${oi}">⚙ Generate PoC</button></div>`:'';return `<tr>${statusCell(r.status)}<td>${esc(r.severity)}</td><td class="mut">${esc(r.category)}/${esc(r.check)}</td><td><b>${esc(r.title)}</b>${whyTip(r)}${r.endpoint?`<div class="mut">${esc(r.endpoint)}</div>`:''}<div class="ev">${esc(r.detail)}</div>${r.remediation?`<div class="mut">fix: ${esc(r.remediation)}</div>`:''}${pb}</td></tr>`;}).join('');
+  const passed=res.filter(r=>['PASS','INFO','SKIP'].includes(r.status)).map(r=>`<tr>${statusCell(r.status)}<td class="mut">${esc(r.category)}/${esc(r.check)}</td><td>${esc(r.title)}${whyTip(r)}</td></tr>`).join('');
   $('#main').innerHTML=`<h2>${esc(d.target)} <span class="badge v-${esc(d.verdict)}">${esc(d.verdict)}</span></h2>
     <div class="row">${kpi}</div>
     <div class="card"><b>Findings (FAIL / WARN)</b><table><tr><th>Status</th><th>Sev</th><th>Check</th><th>Detail</th></tr>${rows||'<tr><td colspan=4 class="mut">none</td></tr>'}</table></div>
@@ -413,7 +521,16 @@ async function showReport(name){const d=await j('/api/report?name='+encodeURICom
     const r=await j('/api/genpoc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({report:b.dataset.rep,idx:+b.dataset.idx})});
     b.disabled=false;b.textContent=t;showPoc(r.error?null:r,r.error);});}
 function showPoc(r,err){const a=$('#pocarea');if(!r){a.innerHTML=`<div class="card"><b>PoC</b><div class="mut">${esc(err||'error')}</div></div>`;return;}
-  a.innerHTML=`<div class="card"><b>Generated PoC — ${esc(r.poc)} ${r.ai?'<span class="gold">· AI-filled</span>':'<span class="mut">· stub (set ANTHROPIC_API_KEY for AI fill)</span>'}</b><pre>${esc(r.code)}</pre><button class="mini runpoc">▶ Run PoC</button><div id="pocresult" class="note"></div></div>`;
+  if(r.kind==='html'){const src=r.url;
+    a.innerHTML=`<div class="card"><b>Generated PoC — ${esc(r.poc)} <span class="gold">· live client-side harness</span></b>
+      <div class="note">Runs locally against vendored ${r.cves?esc(r.cves.join(' / ')):'library'}. <a class="gold" href="${esc(src)}" target="_blank" rel="noopener">open in new tab ↗</a></div>
+      <div id="pocverdict" class="note">running…</div>
+      <iframe src="${esc(src)}" style="width:100%;height:440px;border:1px solid var(--line);border-radius:3px;background:var(--bg2);margin-top:10px"></iframe></div>`;
+    a.scrollIntoView({behavior:'smooth'});
+    const onmsg=(e)=>{if(e&&e.data&&e.data.__poc__){window.removeEventListener('message',onmsg);
+      $('#pocverdict').innerHTML=`<b class="${e.data.ok?'gold':'mut'}">${esc(e.data.verdict)}</b>`;}};
+    window.addEventListener('message',onmsg);return;}
+  a.innerHTML=`<div class="card"><b>Generated PoC — ${esc(r.poc)} ${r.ai?'<span class="gold">· AI-filled</span>':'<span class="mut">· stub (set ANTHROPIC_API_KEY for AI fill)</span>'}</b>${r.note?`<div class="note warnc">${esc(r.note)}</div>`:''}<pre>${esc(r.code)}</pre><button class="mini runpoc">▶ Run PoC</button><div id="pocresult" class="note"></div></div>`;
   a.scrollIntoView({behavior:'smooth'});
   $('.runpoc').onclick=async()=>{const rb=$('.runpoc');rb.disabled=true;$('#pocresult').textContent='running…';
     const rr=await j('/api/runpoc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:r.poc})});
@@ -429,10 +546,10 @@ $('#run').onclick=async()=>{const btn=$('#run');btn.disabled=true;$('#runstat').
   const r=await j('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   if(r.error){$('#runstat').textContent='error: '+r.error;btn.disabled=false;return;}
   const prof=r.profile?(' — '+r.profile+' profile'):'';
-  $('#runstat').textContent='running'+prof;
+  $('#runstat').textContent='running'+prof;document.body.classList.add('scanning');
   const poll=setInterval(async()=>{const st=await j('/api/run_status?id='+r.id);
     $('#runstat').textContent=(st.status==='running'?'running'+prof:'status: '+st.status);
-    if(st.status!=='running'){clearInterval(poll);btn.disabled=false;await loadReports(st.report);}},1500);};
+    if(st.status!=='running'){clearInterval(poll);btn.disabled=false;document.body.classList.remove('scanning');await loadReports(st.report);}},1500);};
 function rosette(size,sw){const c=size/2,rings=[[c*0.9,46],[c*0.74,36],[c*0.58,28],[c*0.42,20]];let p='';
   for(const [r,n] of rings){for(let i=0;i<n;i++){const a=2*Math.PI*i/n,x=c+r*Math.cos(a),y=c+r*Math.sin(a),pr=Math.PI*r/n*0.9;
     p+=`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${pr.toFixed(1)}"/>`;}}
