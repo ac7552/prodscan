@@ -11,5 +11,12 @@ printf 'APPL????' > "$APP/Contents/PkgInfo"
 xcrun swiftc app/main.swift -o "$APP/Contents/MacOS/ProdscanDashboard" \
     -framework Cocoa -framework WebKit
 chmod +x "$APP/Contents/MacOS/ProdscanDashboard"
+
+# Bundle the engine so the app is self-contained (reports go to
+# ~/Library/Application Support/prodscan, so nothing is written inside the app).
+RES="$APP/Contents/Resources"
+mkdir -p "$RES/targets"
+cp dashboard.py prodscan.py bbscan.py pocgen.py "$RES/"
+cp targets/example.json "$RES/targets/" 2>/dev/null || true
 echo "Built $APP"
 echo "Run it:  open $APP        (or move it to /Applications)"

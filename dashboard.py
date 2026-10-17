@@ -28,12 +28,16 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-BASE = os.path.dirname(os.path.abspath(__file__))
-REPORTS_DIR = os.path.join(BASE, "reports")
-TARGETS_DIR = os.path.join(BASE, "targets")
+BASE = os.path.dirname(os.path.abspath(__file__))          # engine (may be read-only in a .app)
+DATA_DIR = os.path.expanduser("~/Library/Application Support/prodscan")
+REPORTS_DIR = os.path.join(DATA_DIR, "reports")            # writable, persists across app replacement
+POCS_DIR = os.path.join(DATA_DIR, "pocs")
+USER_TARGETS = os.path.join(DATA_DIR, "targets")           # user-added configs
+BUNDLED_TARGETS = os.path.join(BASE, "targets")            # shipped templates (e.g. example.json)
 PYTHON = sys.executable or "python3"
 
-os.makedirs(REPORTS_DIR, exist_ok=True)
+for _d in (REPORTS_DIR, POCS_DIR, USER_TARGETS):
+    os.makedirs(_d, exist_ok=True)
 
 RUNS = {}            # run_id -> {"status","output","report"}
 RUNS_LOCK = threading.Lock()
@@ -46,9 +50,19 @@ ALLOWED_HOSTS = {"127.0.0.1", "localhost"}
 
 
 def list_configs():
-    if not os.path.isdir(TARGETS_DIR):
-        return []
-    return sorted(f for f in os.listdir(TARGETS_DIR) if f.endswith(".json"))
+    out = set()
+    for d in (BUNDLED_TARGETS, USER_TARGETS):
+        if os.path.isdir(d):
+            out.update(f for f in os.listdir(d) if f.endswith(".json"))
+    return sorted(out)
+
+
+def target_path(name):
+    for d in (USER_TARGETS, BUNDLED_TARGETS):
+        p = os.path.join(d, name)
+        if os.path.isfile(p):
+            return p
+    return None
 
 
 def host_is_local(url):
@@ -80,7 +94,7 @@ def run_scan(run_id, spec):
     argv = [PYTHON, os.path.join(BASE, "prodscan.py")]
     if spec["mode"] == "config":
         stem = os.path.splitext(spec["config"])[0]
-        argv += ["--config", os.path.join(TARGETS_DIR, spec["config"])]
+        argv += ["--config", target_path(spec["config"]) or spec["config"]]
     else:
         stem = re.sub(r"[^A-Za-z0-9._-]", "_",
                       urlparse(spec["target"]).hostname or "target")
@@ -95,7 +109,7 @@ def run_scan(run_id, spec):
     with RUNS_LOCK:
         RUNS[run_id] = {"status": "running", "output": "", "report": out_name}
     try:
-        p = subprocess.Popen(argv, cwd=BASE, stdout=subprocess.PIPE,
+        p = subprocess.Popen(argv, cwd=DATA_DIR, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, text=True)
         lines = []
         for line in p.stdout:
@@ -115,8 +129,6 @@ def run_scan(run_id, spec):
 # --------------------------------------------------------------------------- #
 # PoC generation + running (AI-assisted, safe-gated)
 # --------------------------------------------------------------------------- #
-
-POCS_DIR = os.path.join(BASE, "pocs")
 
 
 def list_pocs():
@@ -166,7 +178,7 @@ def run_poc(run_id, name):
     with RUNS_LOCK:
         RUNS[run_id] = {"status": "running", "output": "", "report": None}
     try:
-        p = subprocess.Popen(argv, cwd=BASE, stdout=subprocess.PIPE,
+        p = subprocess.Popen(argv, cwd=DATA_DIR, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, text=True)
         out, _ = p.communicate(timeout=150)
         verdict = {0: "CONFIRMED", 1: "NOT", 2: "COULD-NOT-TEST"}.get(
