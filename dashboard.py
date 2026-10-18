@@ -392,10 +392,11 @@ th{color:var(--mut);font-weight:600;font-size:10px;letter-spacing:.12em;text-tra
 .why{margin-left:7px;color:var(--bronze);font-style:normal;font-weight:400;user-select:none}
 .why:hover,.why:focus{color:var(--gold2);outline:none}
 .pill.ht:hover,.pill.ht:focus{outline:none;filter:brightness(1.25)}
-.tip{display:none;position:absolute;left:0;top:150%;z-index:30;width:320px;max-width:66vw;
- background:#0c131a;border:1px solid var(--gold);border-radius:4px;padding:11px 13px;
+.tip{display:none;position:absolute;left:0;top:calc(100% + 8px);z-index:1000;width:300px;max-width:66vw;
+ background:#0b0f14;border:1px solid var(--gold);border-radius:5px;padding:11px 13px;
  color:var(--fg);font:400 12px/1.55 -apple-system,"Segoe UI",Roboto,sans-serif;letter-spacing:0;
- text-transform:none;white-space:normal;box-shadow:0 10px 30px rgba(0,0,0,.55)}
+ text-transform:none;white-space:normal;box-shadow:0 16px 42px rgba(0,0,0,.72),0 0 0 1px rgba(11,15,20,.9)}
+.ht.up .tip{top:auto;bottom:calc(100% + 8px)}
 .tip::before{content:attr(data-label);display:block;color:var(--gold2);font-family:var(--serif);
  font-size:10px;letter-spacing:.16em;text-transform:uppercase;margin-bottom:5px}
 .ht:hover .tip,.ht:focus .tip{display:block}
@@ -560,6 +561,12 @@ $('#mark').innerHTML=rosette(26,1.1);
 $('#emptyRose').innerHTML=rosette(300,1);
 $('#url').addEventListener('input',()=>{const v=$('#url').value.trim();
   $('#profnote').innerHTML=!v?'':(localHost(v)?'<span class="gold">▪ full suite — local target</span>':'<span class="warnc">▪ passive read-only — non-local target</span>');});
+// Open a hover tooltip upward when its trigger sits low in the viewport, so it
+// floats clear of the rows below instead of dropping into them.
+function tipDir(h){if(!h)return;const r=h.getBoundingClientRect();
+  h.classList.toggle('up', r.bottom > window.innerHeight*0.55);}
+document.addEventListener('mouseover',e=>{const h=e.target.closest&&e.target.closest('.ht');if(h)tipDir(h);});
+document.addEventListener('focusin',e=>{const h=e.target.closest&&e.target.closest('.ht');if(h)tipDir(h);});
 loadConfigs();loadReports();
 </script></body></html>"""
 
