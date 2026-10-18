@@ -213,6 +213,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        # Live, single-user data — never let the webview serve a stale list.
+        self.send_header("Cache-Control", "no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(data)
 
@@ -380,6 +382,20 @@ header{padding:18px 26px;border-bottom:1px solid var(--line);display:flex;align-
  opacity:0;transition:opacity .12s,color .12s,border-color .12s}
 .rep:hover .del,.rep .del:focus{opacity:1;outline:none}
 .rep .del:hover{color:var(--fail);border-color:var(--fail)}
+.modal{position:fixed;inset:0;z-index:3000;background:rgba(6,10,14,.62);display:flex;align-items:center;justify-content:center}
+.modalbox{background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:20px 22px;max-width:380px;width:86%;box-shadow:0 24px 60px rgba(0,0,0,.6)}
+.mtitle{font-family:var(--serif);font-size:16px;color:var(--gold2);margin-bottom:8px}
+.mdetail{color:var(--mut);font-size:12px;word-break:break-all;margin-bottom:17px}
+.mbtns{display:flex;justify-content:flex-end;gap:10px}
+.mbtn{font:inherit;font-size:13px;padding:8px 16px;border-radius:3px;border:1px solid var(--line);background:transparent;color:var(--fg);cursor:pointer}
+.mbtn.cancel:hover{border-color:var(--gold)}
+.mbtn.danger{border-color:var(--fail);color:var(--fail)}
+.mbtn.danger:hover{background:var(--fail);color:#0b1016}
+.toast{position:fixed;bottom:24px;left:50%;transform:translate(-50%,8px);z-index:3000;background:var(--panel);
+ border:1px solid var(--pass);color:var(--fg);padding:10px 16px;border-radius:4px;box-shadow:0 10px 30px rgba(0,0,0,.5);
+ font-size:13px;opacity:0;transition:opacity .25s,transform .25s;pointer-events:none}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+.toast.bad{border-color:var(--fail)}
 .rep .t{font-weight:600;font-size:13px}.rep .m{color:var(--mut);font-size:11px;margin-top:3px}
 label{display:block;color:var(--mut);font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin:10px 0 4px}
 input,select{font:inherit;padding:9px 10px;border-radius:3px;border:1px solid var(--line);background:#0c131a;color:var(--fg);width:100%}
@@ -581,16 +597,32 @@ function exploitBlock(r,target){const dep=(r.category==='dependencies'&&r.check=
  return `<div class="expbody">${dep?'<div class="note gold">▶ Use the ⚙ Generate PoC button for a live, runnable exploit harness.</div>':''}${t?`<div class="exphdr">Reproduce / exploit &middot; run only against your own authorized target</div><pre>${esc(t)}</pre>`:''}</div>`;}
 const TOKEN=new URLSearchParams(location.search).get('token')||'';
 async function j(u,o){o=o||{};o.headers=Object.assign({'X-Prodscan-Token':TOKEN},o.headers||{});const r=await fetch(u,o);return r.json();}
+// In-page confirm/toast — WKWebView (the .app shell) has no JS dialog
+// delegate, so window.confirm()/alert() silently return/do nothing.
+function confirmBox(title,detail){return new Promise(res=>{
+  const ov=document.createElement('div');ov.className='modal';
+  ov.innerHTML=`<div class="modalbox"><div class="mtitle">${esc(title)}</div>${detail?`<div class="mdetail">${esc(detail)}</div>`:''}<div class="mbtns"><button class="mbtn cancel">Cancel</button><button class="mbtn danger">Delete</button></div></div>`;
+  document.body.appendChild(ov);
+  const done=v=>{ov.remove();document.removeEventListener('keydown',onkey);res(v);};
+  function onkey(e){if(e.key==='Escape')done(false);if(e.key==='Enter')done(true);}
+  ov.querySelector('.cancel').onclick=()=>done(false);
+  ov.querySelector('.danger').onclick=()=>done(true);
+  ov.onclick=e=>{if(e.target===ov)done(false);};
+  document.addEventListener('keydown',onkey);
+  ov.querySelector('.danger').focus();});}
+function toast(msg,bad){const t=document.createElement('div');t.className='toast'+(bad?' bad':'');t.textContent=msg;
+  document.body.appendChild(t);requestAnimationFrame(()=>t.classList.add('show'));
+  setTimeout(()=>t.classList.remove('show'),2300);setTimeout(()=>t.remove(),2800);}
 async function loadConfigs(){const c=await j('/api/configs');$('#cfg').innerHTML=c.map(x=>`<option>${esc(x)}</option>`).join('')||'<option>(no configs)</option>';}
 async function loadReports(sel){const r=await j('/api/reports');$('#reports').innerHTML=r.map(x=>`<div class="rep" data-n="${esc(x.name)}"><button class="del" title="Delete report" aria-label="Delete report">&times;</button><div class="t">${esc(x.target)} <span class="badge v-${esc(x.verdict)}">${esc(x.verdict)}</span></div><div class="m">${esc(x.name)} · F${x.summary.FAIL||0} W${x.summary.WARN||0} P${x.summary.PASS||0}</div></div>`).join('')||'<p class="mut">No reports yet.</p>';
   document.querySelectorAll('.rep').forEach(e=>e.onclick=ev=>{if(ev.target.closest('.del'))return;showReport(e.dataset.n);});
   document.querySelectorAll('.rep .del').forEach(b=>b.onclick=async ev=>{ev.stopPropagation();
     const nm=b.closest('.rep').dataset.n;
-    if(!confirm('Delete this report? This cannot be undone.\\n\\n'+nm))return;
+    if(!(await confirmBox('Delete this report?',nm)))return;
     const res=await j('/api/delreport',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:nm})});
-    if(res.error){alert('Delete failed: '+res.error);return;}
+    if(res.error){toast('Delete failed: '+res.error,true);return;}
     if(window.__shown===nm){$('#main').innerHTML='<div class="empty"><p class="tagline">Select a report, or point a scan at a target.</p></div>';window.__shown=null;}
-    await loadReports();});
+    await loadReports();toast('Report deleted');});
   if(sel) showReport(sel);}
 async function showReport(name){window.__shown=name;const d=await j('/api/report?name='+encodeURIComponent(name));
   const s=d.summary||{}; const order={FAIL:0,WARN:1,PASS:2,INFO:3,SKIP:4};
