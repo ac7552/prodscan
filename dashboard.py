@@ -308,6 +308,21 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=run_poc, args=(rid, name), daemon=True).start()
             return self._send(200, {"id": rid})
 
+        if u.path == "/api/delreport":
+            name = body.get("name", "")
+            if not SAFE_NAME.match(name or "") or not name.endswith(".json"):
+                return self._send(400, {"error": "bad name"})
+            full = os.path.realpath(os.path.join(REPORTS_DIR, name))
+            root = os.path.realpath(REPORTS_DIR)
+            if not (full == root or full.startswith(root + os.sep)) \
+                    or not os.path.isfile(full):
+                return self._send(404, {"error": "not found"})
+            try:
+                os.remove(full)
+            except OSError as e:
+                return self._send(500, {"error": str(e)})
+            return self._send(200, {"ok": True})
+
         if u.path != "/api/run":
             return self._send(404, {"error": "no route"})
         target = (body.get("target") or "").strip()
@@ -358,8 +373,13 @@ header{padding:18px 26px;border-bottom:1px solid var(--line);display:flex;align-
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:16px;margin-bottom:16px}
 .panel h3{font-family:var(--serif);font-size:15px;letter-spacing:.12em;text-transform:uppercase;color:var(--gold2);margin:0 0 12px;font-weight:400}
 .reports-h{font-family:var(--serif);font-size:13px;letter-spacing:.16em;text-transform:uppercase;color:var(--mut);margin:20px 2px 10px}
-.rep{padding:12px;border:1px solid var(--line);border-radius:3px;margin-bottom:9px;cursor:pointer;background:var(--panel);transition:border-color .15s}
+.rep{position:relative;padding:12px;border:1px solid var(--line);border-radius:3px;margin-bottom:9px;cursor:pointer;background:var(--panel);transition:border-color .15s}
 .rep:hover{border-color:var(--gold)}
+.rep .del{position:absolute;top:7px;right:7px;z-index:2;width:22px;height:22px;line-height:20px;text-align:center;padding:0;
+ border:1px solid var(--line);background:var(--panel);color:var(--mut);font-size:15px;border-radius:3px;cursor:pointer;
+ opacity:0;transition:opacity .12s,color .12s,border-color .12s}
+.rep:hover .del,.rep .del:focus{opacity:1;outline:none}
+.rep .del:hover{color:var(--fail);border-color:var(--fail)}
 .rep .t{font-weight:600;font-size:13px}.rep .m{color:var(--mut);font-size:11px;margin-top:3px}
 label{display:block;color:var(--mut);font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin:10px 0 4px}
 input,select{font:inherit;padding:9px 10px;border-radius:3px;border:1px solid var(--line);background:#0c131a;color:var(--fg);width:100%}
@@ -562,10 +582,17 @@ function exploitBlock(r,target){const dep=(r.category==='dependencies'&&r.check=
 const TOKEN=new URLSearchParams(location.search).get('token')||'';
 async function j(u,o){o=o||{};o.headers=Object.assign({'X-Prodscan-Token':TOKEN},o.headers||{});const r=await fetch(u,o);return r.json();}
 async function loadConfigs(){const c=await j('/api/configs');$('#cfg').innerHTML=c.map(x=>`<option>${esc(x)}</option>`).join('')||'<option>(no configs)</option>';}
-async function loadReports(sel){const r=await j('/api/reports');$('#reports').innerHTML=r.map(x=>`<div class="rep" data-n="${esc(x.name)}"><div class="t">${esc(x.target)} <span class="badge v-${esc(x.verdict)}">${esc(x.verdict)}</span></div><div class="m">${esc(x.name)} · F${x.summary.FAIL||0} W${x.summary.WARN||0} P${x.summary.PASS||0}</div></div>`).join('')||'<p class="mut">No reports yet.</p>';
-  document.querySelectorAll('.rep').forEach(e=>e.onclick=()=>showReport(e.dataset.n));
+async function loadReports(sel){const r=await j('/api/reports');$('#reports').innerHTML=r.map(x=>`<div class="rep" data-n="${esc(x.name)}"><button class="del" title="Delete report" aria-label="Delete report">&times;</button><div class="t">${esc(x.target)} <span class="badge v-${esc(x.verdict)}">${esc(x.verdict)}</span></div><div class="m">${esc(x.name)} · F${x.summary.FAIL||0} W${x.summary.WARN||0} P${x.summary.PASS||0}</div></div>`).join('')||'<p class="mut">No reports yet.</p>';
+  document.querySelectorAll('.rep').forEach(e=>e.onclick=ev=>{if(ev.target.closest('.del'))return;showReport(e.dataset.n);});
+  document.querySelectorAll('.rep .del').forEach(b=>b.onclick=async ev=>{ev.stopPropagation();
+    const nm=b.closest('.rep').dataset.n;
+    if(!confirm('Delete this report? This cannot be undone.\\n\\n'+nm))return;
+    const res=await j('/api/delreport',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:nm})});
+    if(res.error){alert('Delete failed: '+res.error);return;}
+    if(window.__shown===nm){$('#main').innerHTML='<div class="empty"><p class="tagline">Select a report, or point a scan at a target.</p></div>';window.__shown=null;}
+    await loadReports();});
   if(sel) showReport(sel);}
-async function showReport(name){const d=await j('/api/report?name='+encodeURIComponent(name));
+async function showReport(name){window.__shown=name;const d=await j('/api/report?name='+encodeURIComponent(name));
   const s=d.summary||{}; const order={FAIL:0,WARN:1,PASS:2,INFO:3,SKIP:4};
   const res=(d.results||[]).slice().sort((a,b)=>(order[a.status]??9)-(order[b.status]??9));
   const kpi=['FAIL','WARN','PASS','INFO','SKIP'].map(k=>`<div class="kpi"><b class="s-${k}">${s[k]||0}</b><span>${k}</span></div>`).join('');
